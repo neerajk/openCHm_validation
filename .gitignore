@@ -38,7 +38,6 @@ data/output/
 data/input/*.tif
 data/input/*.tiff
 data/input/*.aux.xml
-docs/
 
 # Keep documentation in data folders
 !data/input/README.txt

@@ -11,7 +11,7 @@ Built as a practical geospatial inference engine, this pipeline handles fixed-ra
 
 ---
 
-## 🚀 The Visuals
+## 🚀 The Visualsa
 
 Create a `docs/images/` folder and place your exported figures there.
 
