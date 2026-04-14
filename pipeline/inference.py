@@ -82,10 +82,19 @@ def run_patch_inference(
             try:
                 hs = outputs.hidden_states
                 if hs is not None and len(hs) > 0:
-                    last_hs = hs[-1] # Shape: (Batch, num_tokens, D)
+                    last_hs = hs[-1] # This might be (B, N, D) or (B, C, H, W)
                     
                     for j in range(len(batch_patches)):
                         emb = last_hs[j].cpu().numpy().astype(np.float32)
+                        
+                        # --- THE FIX ---
+                        # HuggingFace DPT reshapes ViT tokens into spatial maps (C, H, W).
+                        # PCA expects a 2D list of tokens (num_tokens, C).
+                        # We transpose and flatten it back to the expected shape.
+                        if emb.ndim == 3:
+                            C, H_feat, W_feat = emb.shape
+                            emb = emb.reshape(C, -1).T
+                            
                         embeddings.append(emb)
                 else:
                     embeddings.extend([None] * len(batch_patches))

@@ -38,6 +38,7 @@ data/output/
 data/input/*.tif
 data/input/*.tiff
 data/input/*.aux.xml
+data/input/esri_patches/*.png
 
 # Keep documentation in data folders
 !data/input/README.txt

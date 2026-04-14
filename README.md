@@ -11,7 +11,7 @@ Built as a practical geospatial inference engine, this pipeline handles fixed-ra
 
 ---
 
-## 🚀 The Visualsa
+## 🚀 The Visuals
 
 Create a `docs/images/` folder and place your exported figures there.
 
@@ -25,7 +25,11 @@ Create a `docs/images/` folder and place your exported figures there.
 ![Patch 0060 Analysis](docs/images/patch_0060.png)
 - Patch-level (512x512) CHM output with corresponding local texture and structure patterns.
 
-### 3. Optional Post-Processing Charts
+### 3. Latest ESRI Embedding (Generated)
+![Latest ESRI Embedding](docs/images/latest_esri_embedding.png)
+- Latest generated ESRI-mode embedding output copied from `data/output/esri_results/`.
+
+### 4. Optional Post-Processing Charts
 - Add your downstream analytics chart at `docs/images/bar_chart.png` (for example, canopy density summaries by grid).
 
 ---
@@ -110,8 +114,8 @@ hf auth login
 
 ## 💻 Usage
 
-### 1. Configure input
-Edit `config.yaml`:
+### Option 1: STAC mode (single GeoTIFF, full-scene mosaic)
+Configure `config.yaml`:
 
 ```yaml
 input:
@@ -125,18 +129,51 @@ model:
   batch_size: 4
 ```
 
-### 2. Run inference
+Run:
 
 ```bash
-python run_inference.py --config config.yaml
+python run_inference.py --config config.yaml --mode stac
 ```
 
-Pipeline outputs are written to `data/output/`:
+Outputs are written to `data/output/`:
 - `canopy_height_mosaic.tif`
 - `mosaic_visualisation.png`
 - `mosaic_canopy_height.png`
 - `mosaic_embeddings_pca.png`
 - `patches/patch_XXXX.png`
+
+### Option 2: ESRI mode (directory of 512x512 PNG patches)
+Fetch ESRI patches first:
+
+```bash
+# single center patch
+python scripts/fetch_esri_patches.py --lat 30.455 --lon 78.075 --zoom 18 --out_dir data/input/esri_patches
+
+# OR full area from bbox: min_lon min_lat max_lon max_lat
+python scripts/fetch_esri_patches.py --bbox 78.05 30.44 78.09 30.47 --zoom 18 --out_dir data/input/esri_patches
+```
+
+Run ESRI inference:
+
+```bash
+python run_inference.py --config config.yaml --mode esri --esri_dir data/input/esri_patches
+```
+
+ESRI outputs are written to:
+- `data/output/esri_results/*_CHM.tif`
+- `data/output/esri_results/*_EMB.png`
+
+### Visualize ESRI results in notebook
+
+```bash
+jupyter lab notebooks/viz_esri.ipynb
+```
+
+If you use classic notebook UI:
+
+```bash
+jupyter notebook notebooks/viz_esri.ipynb
+```
 
 ---
 
@@ -155,7 +192,11 @@ openCHM/
 │   └── runner.py
 ├── scripts/
 │   ├── create_test_image.py
+│   ├── fetch_esri_patches.py
 │   └── fetch_test_image.py
+├── notebooks/
+│   ├── viz.ipynb
+│   └── viz_esri.ipynb
 └── data/
     ├── input/
     └── output/

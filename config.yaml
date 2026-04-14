@@ -4,10 +4,14 @@
 
 # ----- Input -----
 input:
-  image_path: "data/input/sentinel2_rgb.tif"   # Path to your GeoTIFF (3-band RGB)
+  # Pipeline 1: STAC Mode (Upscaled Sentinel-2)
+  image_path: "data/input/sentinel2_rgb.tif"   
+  upscale_factor: 5                            # Scales 10m Sentinel-2 to 2m model resolution
+  
+  # Pipeline 2: ESRI Mode (Native High-Res Patches)
+  esri_patch_dir: "data/input/esri_patches"    # Folder containing 512x512 PNGs
+  
   band_order: [1, 2, 3]                        # Rasterio band indices (1-based) for R, G, B
-  upscale_factor: 5                            # NEW: Scales 10m Sentinel-2 to 2m model resolution
-
 # ----- Model -----
 model:
   # HuggingFace model ID — weights auto-downloaded, no request form needed
