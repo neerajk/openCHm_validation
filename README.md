@@ -29,7 +29,15 @@ Create a `docs/images/` folder and place your exported figures there.
 ![Latest ESRI Embedding](docs/images/latest_esri_embedding.png)
 - Latest generated ESRI-mode embedding output copied from `data/output/esri_results/`.
 
-### 4. Optional Post-Processing Charts
+### 4. ESRI Dense Canopy Panel (Notebook Export)
+![ESRI Dense Canopy Panel](docs/images/viz_esri_dense_examples.png)
+- Saved by `notebooks/viz_esri.ipynb` (cell 2).
+
+### 5. ESRI Sparse Canopy Panel (Notebook Export)
+![ESRI Sparse Canopy Panel](docs/images/viz_esri_sparse_examples.png)
+- Saved by `notebooks/viz_esri.ipynb` (cell 2).
+
+### 6. Optional Post-Processing Charts
 - Add your downstream analytics chart at `docs/images/bar_chart.png` (for example, canopy density summaries by grid).
 
 ---
@@ -174,6 +182,10 @@ If you use classic notebook UI:
 ```bash
 jupyter notebook notebooks/viz_esri.ipynb
 ```
+
+Cell 2 of `viz_esri.ipynb` now exports:
+- `docs/images/viz_esri_dense_examples.png`
+- `docs/images/viz_esri_sparse_examples.png`
 
 ---
 
