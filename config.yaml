@@ -9,7 +9,7 @@ input:
   upscale_factor: 5                            # Scales 10m Sentinel-2 to 2m model resolution
   
   # Pipeline 2: ESRI Mode (Native High-Res Patches)
-  esri_patch_dir: "data/input/esri_patches2"    # Folder containing 512x512 PNGs
+  esri_patch_dir: "data/input/esri_patches"    # Folder containing 512x512 PNGs
   
   band_order: [1, 2, 3]                        # Rasterio band indices (1-based) for R, G, B
 # ----- Model -----
@@ -29,6 +29,7 @@ tiling:
 # ----- Output -----
 output:
   output_dir: "data/output"
+  esri_output_subdir: "esri_results" # used in ESRI mode unless overridden by --output_dir
   save_canopy_tif: true         # Georeferenced canopy height GeoTIFF (metres)
   save_mosaic_tif: true         # Full-scene mosaicked canopy height GeoTIFF
   save_patch_visuals: true      # Per-patch PNG: RGB + heatmap side-by-side

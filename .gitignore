@@ -41,6 +41,7 @@ data/input/esri_iirs/*.png
 data/input/*.tiff
 data/input/*.aux.xml
 data/input/esri_patches/*.png
+data/input/plot_manifest.json
 
 # Keep documentation in data folders
 !data/input/README.txt

@@ -101,5 +101,6 @@ def run_patch_inference(
             except AttributeError:
                 embeddings.extend([None] * len(batch_patches))
 
-    print(f"\n[inference] Completed {len(predictions)} patches.")
+    if verbose:
+        print(f"\n[inference] Completed {len(predictions)} patches.")
     return predictions, embeddings

@@ -1,116 +1,129 @@
+#!/usr/bin/env python3
+"""Download 512×512 RGB patches from ESRI World Imagery tiles.
+
+Filename convention: esri_512_z{zoom}_{tile_x}_{tile_y}.png
+The tile coords are unique — no extra identifier needed.
 """
 
-generates 512x512 PNG patches from ESRI World Imagery tiles for use in the pipeline.
-Usage:
-    python scripts/fetch_esri_patches.py --box 78.05 30.40 78.10 30.45 --zoom 18 --out_dir data/input/esri_patches
-    python scripts/fetch_esri_patches.py --bbox 78.040 30.335 78.050 30.345 --zoom 18 --out_dir data/input/esri_iirs
-"""
+from __future__ import annotations
+
+import argparse
+import io
+import math
+from pathlib import Path
+
+import requests
+from PIL import Image
+from tqdm import tqdm
+
+ESRI_TILE_URL = (
+    "https://server.arcgisonline.com/ArcGIS/rest/services/"
+    "World_Imagery/MapServer/tile/{zoom}/{y}/{x}"
+)
 
 
-# ==========================================
-# 🗺️ TILE MATH & FETCHING LOGIC
-# ==========================================
-
-def latlon_to_tile_xy(lat, lon, zoom):
-    """Converts Latitude/Longitude to standard XYZ tile coordinates."""
+def latlon_to_tile_xy(lat: float, lon: float, zoom: int) -> tuple[int, int]:
+    """Convert lat/lon to slippy-map tile indices at the given zoom level."""
     lat_rad = math.radians(lat)
-    n = 2.0 ** zoom
+    n = 2.0**zoom
     xtile = int((lon + 180.0) / 360.0 * n)
-    ytile = int((1.0 - math.log(math.tan(lat_rad) + (1 / math.cos(lat_rad))) / math.pi) / 2.0 * n)
+    ytile = int((1.0 - math.log(math.tan(lat_rad) + (1.0 / math.cos(lat_rad))) / math.pi) / 2.0 * n)
     return xtile, ytile
 
-def fetch_single_tile(zoom, x, y):
-    """Fetches a single 256x256 tile from the ESRI World Imagery server."""
-    url = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom}/{y}/{x}"
-    # Headers are required so the server doesn't block us as a bot
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        return Image.open(io.BytesIO(response.content))
-    else:
-        print(f"⚠️ Warning: Failed to fetch tile Z:{zoom} X:{x} Y:{y} (HTTP {response.status_code})")
+
+def fetch_single_tile(session: requests.Session, zoom: int, x: int, y: int) -> Image.Image | None:
+    """Download one 256×256 tile. Returns None on failure (non-fatal — blank tile used instead)."""
+    url = ESRI_TILE_URL.format(zoom=zoom, x=x, y=y)
+    try:
+        r = session.get(url, headers={"User-Agent": "Mozilla/5.0 (CHMv2 Validation)"}, timeout=20)
+        r.raise_for_status()
+        return Image.open(io.BytesIO(r.content)).convert("RGB")
+    except requests.RequestException as exc:
+        tqdm.write(f"  WARNING: tile z={zoom} x={x} y={y}: {exc}")
+        return None
+    except Exception as exc:
+        tqdm.write(f"  WARNING: bad image z={zoom} x={x} y={y}: {exc}")
         return None
 
-def stitch_512_patch(zoom, start_x, start_y, output_dir, identifier="patch"):
+
+def stitch_512_patch(
+    session: requests.Session,
+    zoom: int,
+    start_x: int,
+    start_y: int,
+    output_dir: str | Path,
+    overwrite: bool = False,
+) -> Path:
+    """Fetch a 2×2 block of 256px tiles and stitch into one 512×512 PNG.
+
+    Output: esri_512_z{zoom}_{start_x}_{start_y}.png
+    Skips the network fetch if the file already exists (pass overwrite=True to force).
     """
-    Fetches a 2x2 grid of 256px tiles and stitches them into one 512x512 PNG.
-    """
-    # Create a blank 512x512 canvas
-    patch = Image.new('RGB', (512, 512))
-    
-    # Fetch the 4 tiles (Top-Left, Top-Right, Bottom-Left, Bottom-Right)
-    tl = fetch_single_tile(zoom, start_x, start_y)
-    tr = fetch_single_tile(zoom, start_x + 1, start_y)
-    bl = fetch_single_tile(zoom, start_x, start_y + 1)
-    br = fetch_single_tile(zoom, start_x + 1, start_y + 1)
-    
-    # Paste them into the correct quadrants
-    if tl: patch.paste(tl, (0, 0))
-    if tr: patch.paste(tr, (256, 0))
-    if bl: patch.paste(bl, (0, 256))
-    if br: patch.paste(br, (256, 256))
-    
-    # Save the final 512x512 patch
-    os.makedirs(output_dir, exist_ok=True)
-    filename = os.path.join(output_dir, f"esri_512_{identifier}_z{zoom}_{start_x}_{start_y}.png")
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = output_dir / f"esri_512_z{zoom}_{start_x}_{start_y}.png"
+    if filename.exists() and not overwrite:
+        return filename  # already on disk — skip fetch
+
+    patch = Image.new("RGB", (512, 512))
+    # 2×2 grid: (paste_x, paste_y, tile_dx, tile_dy)
+    for px, py, dx, dy in [(0, 0, 0, 0), (256, 0, 1, 0), (0, 256, 0, 1), (256, 256, 1, 1)]:
+        tile = fetch_single_tile(session, zoom, start_x + dx, start_y + dy)
+        if tile is not None:
+            patch.paste(tile, (px, py))
+
     patch.save(filename, format="PNG")
     return filename
 
-# ==========================================
-# 🚀 EXECUTION MODES (Single vs Bounding Box)
-# ==========================================
 
-def fetch_area_by_bbox(bbox, zoom, output_dir):
-    """Calculates all tiles needed to cover a bounding box and fetches them in 512px chunks."""
+def fetch_area_by_bbox(bbox: list[float], zoom: int, output_dir: str | Path) -> None:
+    """Fetch all 512px patches covering a bounding box [min_lon, min_lat, max_lon, max_lat]."""
     min_lon, min_lat, max_lon, max_lat = bbox
-    
-    # Get top-left and bottom-right tile coordinates
-    min_x, min_y = latlon_to_tile_xy(max_lat, min_lon, zoom) # Top-Left
-    max_x, max_y = latlon_to_tile_xy(min_lat, max_lon, zoom) # Bottom-Right
-    
-    print(f"\n🌍 Planning fetch for Bounding Box: {bbox}")
-    print(f"   Tile Grid: X({min_x} to {max_x}), Y({min_y} to {max_y})")
-    
-    # Step by 2 because each 512px patch consumes 2x2 standard tiles
-    patch_coordinates = []
-    for x in range(min_x, max_x + 1, 2):
-        for y in range(min_y, max_y + 1, 2):
-            patch_coordinates.append((x, y))
-            
-    print(f"   Total 512x512 patches to generate: {len(patch_coordinates)}\n")
-    
-    for i, (x, y) in enumerate(tqdm(patch_coordinates, desc="Stitching Patches")):
-        stitch_512_patch(zoom, x, y, output_dir, identifier=f"part_{i}")
-        
-    print(f"\n✅ All patches successfully downloaded to: {output_dir}")
 
-# ==========================================
-# 🛠️ CLI ROUTER
-# ==========================================
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Fetch 512x512 ESRI Patches for CHMv2 Pipeline")
-    
-    # Arguments for a single center point
-    parser.add_argument("--lat", type=float, help="Latitude for a single central patch.")
-    parser.add_argument("--lon", type=float, help="Longitude for a single central patch.")
-    
-    # Arguments for an entire area (Bounding Box)
-    parser.add_argument("--bbox", type=float, nargs=4, help="[min_lon, min_lat, max_lon, max_lat] to fetch a grid of patches.")
-    
-    # Global settings
-    parser.add_argument("--zoom", type=int, default=18, help="Zoom level (18 is approx 0.6m/pixel). Default 18.")
-    parser.add_argument("--out_dir", type=str, default="data/input/esri_patches", help="Output directory.")
-    
+    # Tile range covering the bbox (note: y increases southward)
+    min_x, min_y = latlon_to_tile_xy(max_lat, min_lon, zoom)
+    max_x, max_y = latlon_to_tile_xy(min_lat, max_lon, zoom)
+
+    # Build 2×2-step grid covering the bbox
+    patch_coords = [(x, y) for x in range(min_x, max_x + 1, 2) for y in range(min_y, max_y + 1, 2)]
+    print(f"Bbox fetch: {len(patch_coords)} patches (tile grid x={min_x}..{max_x}, y={min_y}..{max_y})")
+
+    with requests.Session() as session:
+        for x, y in tqdm(patch_coords, desc="Stitching patches", unit="patch"):
+            stitch_512_patch(session, zoom, x, y, output_dir)
+
+    print(f"Done. Saved to: {output_dir}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Fetch 512×512 ESRI World Imagery patches")
+    parser.add_argument("--lat", type=float, help="Latitude (for single-patch mode)")
+    parser.add_argument("--lon", type=float, help="Longitude (for single-patch mode)")
+    parser.add_argument(
+        "--bbox",
+        type=float, nargs=4,
+        metavar=("MIN_LON", "MIN_LAT", "MAX_LON", "MAX_LAT"),
+        help="Bounding box for a grid of patches",
+    )
+    parser.add_argument("--zoom", type=int, default=18)
+    parser.add_argument("--out_dir", type=str, default="data/input/esri_patches")
+    parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
-    
+
     if args.bbox:
         fetch_area_by_bbox(args.bbox, args.zoom, args.out_dir)
-    elif args.lat and args.lon:
-        start_x, start_y = latlon_to_tile_xy(args.lat, args.lon, args.zoom)
-        print(f"\n📍 Fetching single 512x512 patch centered near {args.lat}, {args.lon}...")
-        path = stitch_512_patch(args.zoom, start_x, start_y, args.out_dir, identifier="center")
-        print(f"✅ Saved to: {path}")
-    else:
-        print("❌ Error: You must provide either --bbox OR both --lat and --lon.")
-        print("Example: python fetch_esri_patches.py --lat 30.455 --lon 78.075")
+        return
+
+    if args.lat is None or args.lon is None:
+        raise SystemExit("Provide either --bbox or both --lat and --lon")
+
+    start_x, start_y = latlon_to_tile_xy(args.lat, args.lon, args.zoom)
+    print(f"Fetching patch at lat={args.lat}, lon={args.lon} (z={args.zoom}, tile={start_x},{start_y})")
+    with requests.Session() as session:
+        path = stitch_512_patch(session, args.zoom, start_x, start_y, args.out_dir, overwrite=args.overwrite)
+    print(f"Saved: {path}")
+
+
+if __name__ == "__main__":
+    main()

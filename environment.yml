@@ -17,6 +17,7 @@ dependencies:
       # Core Geospatial & Planetary Computer
       - rasterio
       - pyproj
+      - requests
       - planetary-computer
       - pystac-client
       - odc-stac
@@ -31,5 +32,6 @@ dependencies:
       # Visualisation & Utilities
       - matplotlib
       - scikit-learn
+      - pandas
       - tqdm
       - PyYAML
