@@ -1,21 +1,41 @@
-# openCHM: Cloud-Native Canopy Height Mapping
+# openCHM: Satellite Canopy Height Mapping & Field Validation
 
 ![Python](https://img.shields.io/badge/python-3.11-blue.svg)
 ![PyTorch](https://img.shields.io/badge/PyTorch-MPS%20Ready-ee4c2c.svg)
 ![Transformers](https://img.shields.io/badge/HuggingFace-Transformers-yellow)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
-**openCHM** is an automated, end-to-end canopy height inference and field-plot validation pipeline built on Meta's **CHMv2 (DINOv3-ViT + DPT Head)** model. It runs on globally available ESRI World Imagery, is optimised for Apple Silicon (MPS), and includes a full validation workflow against field-measured tree heights.
+**openCHM** is an end-to-end canopy height inference and field-plot validation pipeline built on Meta's **CHMv2** model (DINOv3-ViT-L + DPT head). It ingests globally available ESRI World Imagery, runs on Apple Silicon (MPS), and includes a full statistical analysis framework for validating CHM predictions against field-measured tree heights.
+
+The target application is **forest carbon accounting** — specifically, validating whether optical satellite-based canopy height estimation can replace or supplement LiDAR/PolInSAR-derived CHMs for above-ground biomass estimation.
 
 ---
 
-## Pipeline Flowchart
+## Bigger Picture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        openCHM Pipeline                             │
-└─────────────────────────────────────────────────────────────────────┘
+ESRI World Imagery (zoom 18)
+        │
+        ▼
+  CHMv2 Foundation Model          ← this pipeline
+  (per-tile height inference)
+        │
+        ▼
+  Canopy Height Map (GeoTIFF)
+        │
+        ├── validate vs field plots (Barkot, Uttarakhand)
+        │
+        └── carbon_accounting_tool  ← downstream consumer
+              (AGB + carbon density from CHM)
+```
 
+Accurate CHM is the critical dependency for carbon estimates. A 10 m height error on a 30 m Sal tree translates to >50% error in above-ground biomass due to the non-linear allometric relationship. This pipeline quantifies that error, identifies its sources, and provides a roadmap to reduce it.
+
+---
+
+## Pipeline
+
+```
   INPUT
   ─────
   field_plots.geojson          config.yaml
@@ -26,102 +46,130 @@
   │  STEP 1 — FETCH  (scripts/fetch_all_plots.py)                   │
   │                                                                 │
   │  • Compute tile (x, y) for each plot at zoom 18                 │
-  │  • Deduplicate: plots sharing a tile → ONE 512×512 PNG          │
-  │  • Fetch 2×2 ESRI tiles, stitch → esri_512_z18_{x}_{y}.png     │
-  │  • Skip tiles already on disk (idempotent re-runs)              │
+  │  • Deduplicate: plots sharing a tile → one 512×512 PNG          │
+  │  • Stitch 2×2 ESRI 256px tiles → esri_512_z18_{x}_{y}.png      │
   │  • Write manifest: sr → {tile_key, tile_png, lat, lon, h_avg}   │
-  └─────────────────────┬───────────────────────────────────────────┘
-                        │
-              data/input/esri_patches/
-              esri_512_z18_*.png  (one per unique tile)
-              data/input/plot_manifest.json
-                        │
-                        ▼
+  └──────────────────────────┬──────────────────────────────────────┘
+                             │
+               data/input/esri_patches/
+               data/input/plot_manifest.json
+                             │
+                             ▼
   ┌─────────────────────────────────────────────────────────────────┐
-  │  STEP 2 — VALIDATE  (run_inference.py --mode validate)          │
+  │  STEP 2 — INFERENCE  (run_inference.py --mode validate)         │
   │                                                                 │
-  │  ┌──────────────────────────────────────────────────────────┐   │
-  │  │  2a. INFERENCE                                           │   │
-  │  │  • Load CHMv2 model ONCE (DINOv3-ViT-L + DPT head)      │   │
-  │  │  • For each unique tile PNG (progress bar):              │   │
-  │  │    ─ Run batched inference → height map (H×W float32)    │   │
-  │  │    ─ Save esri_512_z18_{x}_{y}_CHM.tif  (EPSG:3857)     │   │
-  │  │    ─ Save esri_512_z18_{x}_{y}_EMB.png  (PCA embedding) │   │
-  │  │  • Skip tiles whose CHM already exists (--overwrite off) │   │
-  │  └──────────────────────────────────────────────────────────┘   │
-  │                         │                                        │
-  │                         ▼                                        │
-  │  ┌──────────────────────────────────────────────────────────┐   │
-  │  │  2b. COMPARE HEIGHTS                                     │   │
-  │  │  • For each field plot (sr):                             │   │
-  │  │    ─ Resolve CHM via manifest tile_key                   │   │
-  │  │    ─ Clip CHM to 12.5×12.5 m square footprint           │   │
-  │  │    ─ Filter pixels: nodata, coverage < threshold         │   │
-  │  │    ─ Compute mean height within footprint                │   │
-  │  │    ─ Status: ok / low_coverage / missing_chm / no_crs   │   │
-  │  │  • Metrics: RMSE, MAE, bias, Pearson r, R²              │   │
-  │  │  • vs benchmark: PolInSAR TSI (Khati 2014)              │   │
-  │  │    RMSE = 2.28 m, r = 0.62                              │   │
-  │  │  • Output: validation_results.csv                        │   │
-  │  │            validation_metrics.json                       │   │
-  │  │            validation_scatter.png                        │   │
-  │  └──────────────────────────────────────────────────────────┘   │
-  │                         │                                        │
-  │                         ▼                                        │
-  │  ┌──────────────────────────────────────────────────────────┐   │
-  │  │  2c. VISUALISE                                           │   │
-  │  │  • For each tile with ≥1 ok plot → tile panel PNG:       │   │
-  │  │    ─ Left:  ESRI patch with ALL plot bboxes overlaid     │   │
-  │  │             (distinct colour + sr label per plot)        │   │
-  │  │    ─ Mid:   CHM heatmap with same bboxes                 │   │
-  │  │    ─ Right: per-plot stats table                         │   │
-  │  │             (sr | H_field | H_pred | Δ | status)        │   │
-  │  │  • Summary dashboard PNG (6-panel):                      │   │
-  │  │    map · residuals · benchmark bars · scatter · distrib  │   │
-  │  └──────────────────────────────────────────────────────────┘   │
+  │  • Load CHMv2 once (DINOv3-ViT-L + DPT head)                   │
+  │  • Per unique tile: forward pass → height map (float32, metres) │
+  │  • Save esri_512_z18_{x}_{y}_CHM.tif  (EPSG:3857 GeoTIFF)      │
+  │  • Save esri_512_z18_{x}_{y}_EMB.png  (PCA embedding vis)       │
+  └──────────────────────────┬──────────────────────────────────────┘
+                             │
+               data/output/esri_results/
+                             │
+                             ▼
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  STEP 3 — EXTRACT DATASET  (scripts/extract_plot_dataset.py)    │
+  │                                                                 │
+  │  • Per field plot: locate CHM GeoTIFF via tile key              │
+  │  • Extract 12.5×12.5 m footprint (≈24 px at zoom 18)           │
+  │  • Compute: mean, median, std, min, max, coverage ratio         │
+  │  • Save: pixels.npy, metadata.json, bbox_overlay.png            │
+  │  • Write: dataset_summary.csv (all 100 plots)                   │
+  └──────────────────────────┬──────────────────────────────────────┘
+                             │
+         scripts/statistical_analysis/data/
+         ├── plot_001/ … plot_100/     (per-plot pixel arrays)
+         └── dataset_summary.csv
+                             │
+                             ▼
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  STEP 4 — STATISTICAL ANALYSIS  (notebooks/)                    │
+  │                                                                 │
+  │  4a. Global metrics & diagnostics       visualize_comp.ipynb    │
+  │  4b. Filter validation (F1, F2)         visualize_comp.ipynb    │
+  │  4c. Publication figures                visualize_comp.ipynb    │
+  │  4d. Worst-plot inspection              worst_plots_inspection  │
   └─────────────────────────────────────────────────────────────────┘
-                        │
-  OUTPUT
-  ──────
-  data/output/
-  ├── esri_results/
-  │   ├── esri_512_z18_*_CHM.tif        ← georeferenced CHM per tile
-  │   └── esri_512_z18_*_EMB.png        ← DINOv3 embedding PCA
-  ├── validation_results.csv            ← per-plot metrics
-  ├── validation_metrics.json           ← RMSE / r / n vs benchmark
-  ├── validation_scatter.png            ← scatter + benchmark bars
-  ├── validation_summary_dashboard.png  ← 6-panel overview
-  └── validation_panels/
-      └── tile_z18_*_panel.png          ← one panel per tile (multi-bbox)
 ```
 
 ---
 
-## Visuals
+## Validation Results — Barkot Range (n=100 field plots)
 
-### Full-Scene Inference (STAC mode)
-![Full Scene Mosaic](docs/images/mosaic_visualisation.png)
-Left: Sentinel-2 RGB input. Center: CHM in metres. Right: DINOv3 PCA embedding.
+**Field dataset:** Khati 2014, Barkot Range, Uttarakhand. 100 plots, 12.5×12.5 m footprint, measured h_avg (mean tree height per plot).  
+**Model:** CHMv2, ESRI World Imagery zoom 18 (~0.6 m/px per 256px tile; each esri_512 covers 2×2 tiles).  
+**Benchmark:** PolInSAR Three-Stage Inversion, same plots — RMSE = 2.28 m, r = 0.62.
 
-### ESRI Patch Examples
-![ESRI Dense Canopy](docs/images/viz_esri_dense_examples.png)
-![ESRI Sparse Canopy](docs/images/viz_esri_sparse_examples.png)
+### Measured Performance
+
+| Metric | All 100 plots | After F1+F2 filter (n=82) |
+|--------|:---:|:---:|
+| RMSE | **8.08 m** | **6.80 m** |
+| MAE | 6.34 m | — |
+| Mean Bias | +1.49 m | — |
+| Pearson r | 0.099 (p=0.33) | — |
+| vs PolInSAR RMSE | 3.5× worse | 3.0× worse |
+
+The Pearson r of 0.099 is **not statistically significant** (p=0.33). The model has essentially no linear correlation with field heights across these 100 plots.
+
+### Failure Mode 1 — GPS Coordinate Errors
+
+Visual inspection of the 5 worst plots (|Δ| > 17 m) reveals that field GPS coordinates for several plots land on **roads and forest clearings**, not on canopy. CHMv2 correctly predicts near-zero height for roads — the error is in the field dataset coordinates, not the model.
+
+**Diagnostic signal:** `pct_below5` — fraction of CHM pixels within the bbox predicting height < 5 m.  
+- Pearson r with |error| = **0.671** (strongest predictor by far)
+- Plots with GPS errors cluster at pct_below5 ≈ 1.0 (100% of pixels sub-canopy)
+- Distribution is bimodal: valid plots near 0, coordinate-error plots near 1.0
+
+**Filter F1:** `pct_below5 < 0.50` — removes plots where the majority of the footprint is non-forest.
+
+### Failure Mode 2 — Tile-Edge Truncation
+
+Some GPS coordinates fall within 12 pixels of the 512px tile border. Because the esri_512 image covers a fixed 2×2 tile area, a plot near the edge has part of its 12.5 m footprint outside the fetched image. The extracted pixel array is truncated, biasing statistics.
+
+**Filter F2:** `tile_edge_dist >= 12 px` — removes plots with insufficient margin to tile border.
+
+### Failure Mode 3 — Optical Saturation (Model Limitation)
+
+For the remaining 82 filtered plots, the model still underestimates tall mature Sal forest. Error increases with true height:
+
+| True Height Class | Mean Bias (m) |
+|---|---|
+| < 20 m | near zero |
+| 20–24 m | −2 to −4 m |
+| 24–27 m | −5 to −8 m |
+| > 27 m | **−8 to −12 m** |
+
+**Why:** ESRI imagery sees only the top leaf layer. A 20 m and a 30 m closed-canopy Sal stand are visually indistinguishable from nadir — both present a continuous green texture. CHMv2 relies on shadows and crown gaps for depth inference, neither of which exists in dense multi-story tropical forest. The model's training distribution skews toward sparse boreal and urban trees where ground is visible.
+
+This is a **fundamental limitation of monocular optical depth estimation** in closed-canopy tropical forest, not a fixable pipeline issue.
+
+### Consequence for Carbon Accounting
+
+Biomass scales non-linearly with height (allometric exponent ≈ 2.5 for Sal). Missing 10 m of a 30 m tree height does not mean missing 33% of biomass — it means missing **>50% of carbon weight**. Until RMSE approaches benchmark levels (~2–3 m), optical CHM from this pipeline should not be used as the primary height input for carbon estimates; it can serve as a spatial prior or auxiliary variable alongside GEDI/PolInSAR.
 
 ---
 
-## HuggingFace Access
+## RMSE Improvement Roadmap
 
-The CHMv2 weights require a HuggingFace account with model access.
+Listed in priority order. Only F1+F2 filtering is currently implemented.
 
-1. Open [facebook/dinov3-vitl16-chmv2-dpt-head](https://huggingface.co/facebook/dinov3-vitl16-chmv2-dpt-head) and request access.
-2. Create a token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) (Read scope).
+| # | Method | Expected RMSE gain | Status |
+|---|--------|-------------------|--------|
+| 1 | **F1+F2 coordinate & edge filter** | −1.28 m (−15.9%) | ✅ Done |
+| 2 | **Tile centering fix** | unknown (moderate) | 🔲 Pending |
+| 3 | **Aggregation: median or p25–p75 mean** | unknown (small–moderate) | 🔲 Pending |
+| 4 | **GEDI L2A bias calibration** | potentially large | 🔲 Pending |
+| 5 | **Zoom 19 refetch** (0.3 m/px) | unknown | 🔲 Pending |
+| 6 | **Terrain correction** (Copernicus DEM) | unknown | 🔲 Pending |
 
-```bash
-pip install -U "huggingface_hub[cli]"
-hf auth login              # interactive
-# or: hf auth login --token "$HF_TOKEN"
-hf auth whoami             # verify
-```
+**Tile centering fix:** `latlon_to_tile_xy` returns the tile whose top-left corner is nearest the plot coordinate. A plot near a tile edge may be in the wrong pixel region of the 512px canvas. Fix: compute sub-tile pixel offset and re-center the 2×2 stitch so the plot lands near pixel (256, 256).
+
+**Aggregation:** Currently using per-bbox mean. Road/shadow pixels drag the mean down. Median or interquartile mean is more robust. Testable immediately from existing `pixels.npy` without re-fetching.
+
+**GEDI calibration:** Linear rescaling `H_cal = a × H_CHM + b` fit on nearby GEDI L2A LiDAR shots. Can correct systematic bias without changing the model. Requires fetching GEDI data for the Barkot bbox.
+
+**GPS accuracy floor:** Field GPS at Barkot likely has 3–10 m horizontal uncertainty. A 5 m GPS shift on a 12.5 m plot means ~40% of the bbox is on the wrong pixels. This sets a theoretical RMSE floor independent of all other improvements.
 
 ---
 
@@ -131,139 +179,75 @@ hf auth whoami             # verify
 git clone https://github.com/yourusername/openCHM.git
 cd openCHM
 
-micromamba env create -f environment.yml   # or: conda env create
+micromamba env create -f environment.yml
 micromamba activate chmv2
 
 # Verify Apple Silicon GPU
 python -c "import torch; print(torch.backends.mps.is_available())"
-
-hf auth login   # required once
 ```
+
+### HuggingFace model access
+
+```bash
+pip install -U "huggingface_hub[cli]"
+hf auth login          # interactive — required once
+hf auth whoami         # verify
+```
+
+Model: [facebook/dinov3-vitl16-chmv2-dpt-head](https://huggingface.co/facebook/dinov3-vitl16-chmv2-dpt-head) — request access before first use.
 
 ---
 
 ## Usage
 
-### Mode 1 — STAC (full-scene Sentinel-2 GeoTIFF)
+### Full validation pipeline
 
 ```bash
-python run_inference.py --mode stac
-```
-
-Outputs to `data/output/`: `canopy_height_mosaic.tif`, `mosaic_visualisation.png`, per-patch PNGs.
-
----
-
-### Mode 2 — ESRI (ad-hoc patch)
-
-Fetch a single 512×512 patch and run inference:
-
-```bash
-# Fetch one patch
-python scripts/fetch_esri_patches.py \
-  --lat 30.455 --lon 78.075 --zoom 18 \
-  --out_dir data/input/esri_patches
-
-# Or fetch a bounding box grid
-python scripts/fetch_esri_patches.py \
-  --bbox 78.05 30.44 78.09 30.47 --zoom 18 \
-  --out_dir data/input/esri_patches
-
-# Run inference
-python run_inference.py --mode esri \
-  --esri_dir data/input/esri_patches
-```
-
-Outputs to `data/output/esri_results/`: `*_CHM.tif`, `*_EMB.png`.
-
----
-
-### Mode 3 — Validate (full end-to-end pipeline)
-
-Runs inference, comparison, and visualisation in one command. The model loads once and processes all tiles — no redundant reloads.
-
-#### Step 1: Fetch tiles
-
-```bash
+# Step 1: fetch tiles (tile-deduplicated, idempotent)
 python scripts/fetch_all_plots.py \
   --plots_geojson data/input/field_plots.geojson \
   --zoom 18 \
   --out_dir data/input/esri_patches \
   --manifest data/input/plot_manifest.json
-```
 
-Dry-run first to see which plots share tiles:
-
-```bash
-python scripts/fetch_all_plots.py --dry_run
-```
-
-#### Step 2: Infer + Compare + Visualise
-
-```bash
+# Step 2: infer + compare + visualise (model loads once)
 python run_inference.py --mode validate
+
+# Options
+python run_inference.py --mode validate --overwrite              # re-run existing CHMs
+python run_inference.py --mode validate --min_coverage_ratio 0.85
 ```
 
-With options:
+### Ad-hoc ESRI patch
 
 ```bash
-# Re-run inference even if CHMs exist
-python run_inference.py --mode validate --overwrite
+python scripts/fetch_esri_patches.py \
+  --lat 30.455 --lon 78.075 --zoom 18 \
+  --out_dir data/input/esri_patches
 
-# Adjust footprint or coverage threshold
-python run_inference.py --mode validate \
-  --plot_size_m 12.5 \
-  --min_coverage_ratio 0.85 \
-  --rotation_deg 0.0
+python run_inference.py --mode esri --esri_dir data/input/esri_patches
 ```
 
-#### Outputs
-
-```
-data/output/
-├── esri_results/
-│   ├── esri_512_z18_{x}_{y}_CHM.tif   ← one per unique tile
-│   └── esri_512_z18_{x}_{y}_EMB.png
-├── validation_results.csv             ← sr, h_avg, h_pred, delta, status
-├── validation_metrics.json            ← RMSE, r, MAE, bias vs benchmark
-├── validation_scatter.png             ← scatter + benchmark comparison
-├── validation_summary_dashboard.png   ← 6-panel overview dashboard
-└── validation_panels/
-    └── tile_z18_{x}_{y}_panel.png     ← ESRI + CHM + stats (all plots on tile)
-```
-
----
-
-### Standalone validation scripts
-
-These still work independently if you want to re-run just one stage:
+### Extract per-plot pixel dataset
 
 ```bash
-# Re-compare heights only (with tile-based CHM lookup)
-python scripts/compare_heights.py \
+python scripts/extract_plot_dataset.py \
   --plots_geojson data/input/field_plots.geojson \
   --chm_dir data/output/esri_results \
-  --manifest data/input/plot_manifest.json
-
-# Re-render panels + dashboard from existing CSV
-python scripts/visualize_plots.py \
-  --csv data/output/validation_results.csv \
-  --manifest data/input/plot_manifest.json \
-  --chm_dir data/output/esri_results
-
-# Single tile panel only
-python scripts/visualize_plots.py \
-  --csv data/output/validation_results.csv \
-  --manifest data/input/plot_manifest.json \
-  --chm_dir data/output/esri_results \
-  --tile_key z18_187906_107749
-
-# Dashboard only
-python scripts/visualize_plots.py \
-  --csv data/output/validation_results.csv \
-  --manifest data/input/plot_manifest.json \
-  --summary_only
+  --output_dir scripts/statistical_analysis/data \
+  --plot_size_m 12.5
 ```
+
+### Statistical analysis notebooks
+
+```bash
+jupyter notebook scripts/statistical_analysis/notebooks/
+```
+
+| Notebook | Contents |
+|---|---|
+| `visualize_comp.ipynb` | Global metrics · 4-panel diagnostic · filter evidence (F1/F2) · publication figures · per-plot detail panels |
+| `worst_plots_inspection.ipynb` | ESRI + CHM panels for top-5 worst plots with sr labels — visual GPS error confirmation |
 
 ---
 
@@ -271,73 +255,77 @@ python scripts/visualize_plots.py \
 
 ```
 openCHM/
-├── run_inference.py              ← master entry point (stac / esri / validate)
-├── config.yaml                  ← model, tiling, output settings
+├── run_inference.py              ← entry point (stac / esri / validate)
+├── config.yaml
 ├── environment.yml
 │
-├── pipeline/                    ← core inference library
-│   ├── model.py                 ← CHMv2 + DINOv3 model loader
-│   ├── tiling.py                ← patch extraction + mosaicking
-│   ├── inference.py             ← batched CHMv2 forward pass
-│   ├── visualise.py             ← GeoTIFF writer + PCA embedding vis
-│   └── runner.py                ← StacInferencePipeline / EsriPatchInferencePipeline
+├── pipeline/
+│   ├── model.py                  ← CHMv2 loader
+│   ├── inference.py              ← batched forward pass
+│   ├── tiling.py                 ← patch extraction
+│   ├── visualise.py              ← GeoTIFF writer + PCA vis
+│   └── runner.py                 ← pipeline orchestration
 │
-├── scripts/                     ← validation + data utilities
-│   ├── fetch_esri_patches.py    ← download individual ESRI tiles
-│   ├── fetch_all_plots.py       ← tile-deduplicated fetch + manifest writer
-│   ├── validation_common.py     ← shared data types, metrics, geometry helpers
-│   ├── compare_heights.py       ← CHM vs field plots → CSV + metrics + scatter
-│   ├── visualize_plots.py       ← tile panels (multi-bbox) + summary dashboard
-│   ├── run_inference_all_plots.py   ← (legacy; superseded by --mode validate)
-│   └── compare_heights.py
+├── scripts/
+│   ├── fetch_esri_patches.py     ← single-tile ESRI fetch
+│   ├── fetch_all_plots.py        ← tile-deduplicated fetch + manifest
+│   ├── extract_plot_dataset.py   ← per-plot pixel extraction → pixels.npy
+│   ├── validation_common.py      ← shared types, metrics, geometry
+│   ├── compare_heights.py        ← CHM vs field → CSV + scatter
+│   └── visualize_plots.py        ← tile panels + dashboard
 │
-├── notebooks/
-│   ├── viz.ipynb
-│   └── viz_esri.ipynb
+├── scripts/statistical_analysis/
+│   ├── data/
+│   │   ├── plot_001/ … plot_100/
+│   │   │   ├── pixels.npy        ← 2D CHM array (bbox footprint)
+│   │   │   ├── metadata.json     ← sr, lat, lon, bbox, pred stats
+│   │   │   └── bbox_overlay.png
+│   │   └── dataset_summary.csv   ← aggregated stats (100 plots)
+│   └── notebooks/
+│       ├── visualize_comp.ipynb
+│       └── worst_plots_inspection.ipynb
 │
 └── data/
     ├── input/
-    │   ├── field_plots.geojson  ← field plot coordinates + h_avg
-    │   ├── plot_manifest.json   ← sr → tile_key + tile_png mapping
-    │   └── esri_patches/        ← esri_512_z18_{x}_{y}.png tiles
+    │   ├── field_plots.geojson
+    │   ├── plot_manifest.json
+    │   └── esri_patches/             ← esri_512_z18_{x}_{y}.png
     └── output/
-        ├── esri_results/        ← *_CHM.tif, *_EMB.png
+        ├── esri_results/             ← *_CHM.tif, *_EMB.png
+        ├── pub_4panel_*.png          ← publication figure (ESRI + CHM + plot details)
+        ├── worst_plots_inspection.png
+        ├── filter_diagnostics.png    ← F1/F2 correlation evidence
+        ├── statistical_diagnostics.png
         ├── validation_results.csv
-        ├── validation_metrics.json
-        ├── validation_scatter.png
-        ├── validation_summary_dashboard.png
-        └── validation_panels/   ← tile_{tile_key}_panel.png
+        └── validation_metrics.json
 ```
 
 ---
 
-## Validation Benchmark
+## Known Limitations
 
-Field plots: Barkot Range, Uttarakhand (n=100, Khati 2014 dataset).  
-Footprint: 12.5 × 12.5 m square centered on GPS coordinate.  
-Coverage filter: ≥97% valid pixels inside footprint.
-
-| Metric | PolInSAR TSI (Khati 2014) | CHMv2 (this work) |
-|--------|--------------------------|-------------------|
-| RMSE   | 2.28 m                   | —                 |
-| r      | 0.62                     | —                 |
-
----
-
-## Known Limitations & Roadmap
-
-- **Tile alignment**: the 2×2 tile stitch starts at the tile index of the plot centre — plots near a tile edge may be off-centre in the 512px canvas. Fix planned: center the stitch on the plot's pixel position within the tile.
-- **GEDI calibration**: bias correction using nearby GEDI L2A shots is not yet implemented.
-- **Cloud/shadow masking**: SCL-based pre-filtering not yet integrated.
-- **Terrain correction**: steep Himalayan slopes foreshorten canopy — slope-based scaling factor is future work.
+| Issue | Root cause | Current mitigation |
+|---|---|---|
+| RMSE 8.08 m vs benchmark 2.28 m | Optical saturation in closed-canopy forest | Ongoing — see roadmap |
+| Near-zero predictions (sr=41,42,92,94) | GPS coordinates land on roads | F1 filter removes |
+| Tile-edge truncation (sr=94) | bbox at row_min=0 | F2 filter removes |
+| No correlation with field heights (r=0.10) | Model training domain mismatch | GEDI calibration planned |
+| Tall tree underestimation (>27 m, −8 to −12 m) | Closed-canopy optical opacity | Fundamental — needs LiDAR fusion |
+| GPS accuracy floor | Field GPS ±3–10 m on 12.5 m plots | Sets theoretical RMSE minimum |
 
 ---
 
 ## References
 
-- CHMv2: [Tollefson et al. arXiv:2603.06382](https://arxiv.org/abs/2603.06382)
-- DINOv3: [arXiv:2508.10104](https://arxiv.org/abs/2508.10104)
-- Model weights: [facebook/dinov3-vitl16-chmv2-dpt-head](https://huggingface.co/facebook/dinov3-vitl16-chmv2-dpt-head)
-- Field benchmark: Khati et al. 2014 — PolInSAR Three-Stage Inversion, Barkot Range
-- Imagery: [ESRI World Imagery](https://www.esri.com/en-us/maps/imagery) (zoom 18, ~0.6 m/px)
-- DEM: [Copernicus GLO-30](https://planetarycomputer.microsoft.com/) via Microsoft Planetary Computer
+- **CHMv2:** Tollefson et al., arXiv:2603.06382
+- **DINOv3:** arXiv:2508.10104
+- **Model weights:** [facebook/dinov3-vitl16-chmv2-dpt-head](https://huggingface.co/facebook/dinov3-vitl16-chmv2-dpt-head)
+- **Field benchmark:** Khati et al. 2014 — PolInSAR Three-Stage Inversion, Barkot Range, Uttarakhand
+- **Imagery:** ESRI World Imagery (zoom 18)
+- **DEM:** Copernicus GLO-30 via Microsoft Planetary Computer
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
